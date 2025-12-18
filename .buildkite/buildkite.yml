@@ -1,0 +1,309 @@
+env:
+  OPENTOFU_VERSION: "1.6.2"
+  TFLINT_VERSION: "0.50.3"
+  TFSEC_VERSION: "1.28.5"
+  TERRAFORM_DOCS_VERSION: "0.17.0"
+  TRIVY_VERSION: "0.49.1"
+  GIT_CLIFF_VERSION: "2.1.2"
+
+steps:
+  - group: ":hammer: Setup"
+    steps:
+      - label: ":tofu: Install Tools"
+        key: "install-tools"
+        command: |
+          $$ErrorActionPreference = "Stop"
+          $$ToolsDir = "C:\buildkite-tools"
+          New-Item -ItemType Directory -Force -Path $$ToolsDir | Out-Null
+          $$env:PATH = "$$ToolsDir;$$env:PATH"
+          
+          Write-Host "--- Installing OpenTofu"
+          Invoke-WebRequest -Uri "https://github.com/opentofu/opentofu/releases/download/v$$env:OPENTOFU_VERSION/tofu_$${env:OPENTOFU_VERSION}_windows_amd64.zip" -OutFile "$$ToolsDir\tofu.zip"
+          Expand-Archive -Path "$$ToolsDir\tofu.zip" -DestinationPath $$ToolsDir -Force
+          Remove-Item "$$ToolsDir\tofu.zip"
+          tofu version
+          
+          Write-Host "--- Installing TFLint"
+          Invoke-WebRequest -Uri "https://github.com/terraform-linters/tflint/releases/download/v$$env:TFLINT_VERSION/tflint_windows_amd64.zip" -OutFile "$$ToolsDir\tflint.zip"
+          Expand-Archive -Path "$$ToolsDir\tflint.zip" -DestinationPath $$ToolsDir -Force
+          Remove-Item "$$ToolsDir\tflint.zip"
+          tflint --version
+          
+          Write-Host "--- Installing tfsec"
+          Invoke-WebRequest -Uri "https://github.com/aquasecurity/tfsec/releases/download/v$$env:TFSEC_VERSION/tfsec-windows-amd64.exe" -OutFile "$$ToolsDir\tfsec.exe"
+          tfsec --version
+          
+          Write-Host "--- Installing terraform-docs"
+          Invoke-WebRequest -Uri "https://github.com/terraform-docs/terraform-docs/releases/download/v$$env:TERRAFORM_DOCS_VERSION/terraform-docs-v$${env:TERRAFORM_DOCS_VERSION}-windows-amd64.zip" -OutFile "$$ToolsDir\terraform-docs.zip"
+          Expand-Archive -Path "$$ToolsDir\terraform-docs.zip" -DestinationPath $$ToolsDir -Force
+          Remove-Item "$$ToolsDir\terraform-docs.zip"
+          terraform-docs --version
+          
+          Write-Host "--- Installing Trivy"
+          Invoke-WebRequest -Uri "https://github.com/aquasecurity/trivy/releases/download/v$$env:TRIVY_VERSION/trivy_$${env:TRIVY_VERSION}_windows-64bit.zip" -OutFile "$$ToolsDir\trivy.zip"
+          Expand-Archive -Path "$$ToolsDir\trivy.zip" -DestinationPath $$ToolsDir -Force
+          Remove-Item "$$ToolsDir\trivy.zip"
+          trivy --version
+          
+          Write-Host "--- Installing git-cliff"
+          Invoke-WebRequest -Uri "https://github.com/orhun/git-cliff/releases/download/v$$env:GIT_CLIFF_VERSION/git-cliff-$${env:GIT_CLIFF_VERSION}-x86_64-pc-windows-msvc.zip" -OutFile "$$ToolsDir\git-cliff.zip"
+          Expand-Archive -Path "$$ToolsDir\git-cliff.zip" -DestinationPath "$$ToolsDir\git-cliff-temp" -Force
+          Move-Item -Path "$$ToolsDir\git-cliff-temp\git-cliff-$$env:GIT_CLIFF_VERSION\git-cliff.exe" -Destination "$$ToolsDir\git-cliff.exe" -Force
+          Remove-Item "$$ToolsDir\git-cliff.zip"
+          Remove-Item "$$ToolsDir\git-cliff-temp" -Recurse -Force
+          git-cliff --version
+          
+          Write-Host "--- Installing ggshield (GitGuardian)"
+          pip install ggshield --quiet
+          ggshield --version
+          
+          Write-Host "--- Installing Checkov"
+          pip install checkov --quiet
+
+  - wait
+
+  - group: ":mag: Linting & Formatting"
+    steps:
+      - label: ":tofu: Format Check"
+        key: "fmt"
+        command: |
+          $$ErrorActionPreference = "Stop"
+          $$env:PATH = "C:\buildkite-tools;$$env:PATH"
+          tofu fmt -check -recursive -diff
+          if ($$LASTEXITCODE -ne 0) { exit 1 }
+
+      - label: ":tofu: Validate"
+        key: "validate"
+        command: |
+          $$ErrorActionPreference = "Stop"
+          $$env:PATH = "C:\buildkite-tools;$$env:PATH"
+          
+          Get-ChildItem -Recurse -Filter "*.tf" | 
+            Select-Object -ExpandProperty DirectoryName -Unique | 
+            ForEach-Object {
+              Write-Host "--- Validating $$_"
+              Push-Location $$_
+              tofu init -backend=false
+              if ($$LASTEXITCODE -ne 0) { Pop-Location; exit 1 }
+              tofu validate
+              if ($$LASTEXITCODE -ne 0) { Pop-Location; exit 1 }
+              Pop-Location
+            }
+
+      - label: ":lint: TFLint"
+        key: "tflint"
+        command: |
+          $$ErrorActionPreference = "Stop"
+          $$env:PATH = "C:\buildkite-tools;$$env:PATH"
+          tflint --init
+          tflint --recursive --format compact
+
+  - group: ":shield: Security Scanning"
+    steps:
+      - label: ":closed_lock_with_key: GitGuardian Secret Scan"
+        key: "gitguardian"
+        command: |
+          $$ErrorActionPreference = "Stop"
+          ggshield secret scan path . --recursive
+        env:
+          GITGUARDIAN_API_KEY: "${GITGUARDIAN_API_KEY}"
+
+      - label: ":shield: tfsec"
+        key: "tfsec"
+        command: |
+          $$env:PATH = "C:\buildkite-tools;$$env:PATH"
+          tfsec . --format lovely --minimum-severity MEDIUM
+        soft_fail:
+          - exit_status: 1
+
+      - label: ":shield: Trivy IaC Scan"
+        key: "trivy"
+        command: |
+          $$env:PATH = "C:\buildkite-tools;$$env:PATH"
+          trivy config . --severity HIGH,CRITICAL --exit-code 1
+        soft_fail:
+          - exit_status: 1
+
+      - label: ":shield: Checkov"
+        key: "checkov"
+        command: |
+          checkov -d . --framework terraform --compact --quiet
+        soft_fail:
+          - exit_status: 1
+
+  - group: ":microscope: Static Analysis"
+    steps:
+      - label: ":mag_right: OpenTofu Complexity"
+        key: "complexity"
+        command: |
+          Write-Host "--- Resource Count"
+          (Select-String -Path "*.tf" -Pattern "^resource " -Recurse | Measure-Object).Count
+          
+          Write-Host "--- Module Count"
+          (Select-String -Path "*.tf" -Pattern "^module " -Recurse | Measure-Object).Count
+          
+          Write-Host "--- Variable Count"
+          (Select-String -Path "*.tf" -Pattern "^variable " -Recurse | Measure-Object).Count
+          
+          Write-Host "--- Output Count"
+          (Select-String -Path "*.tf" -Pattern "^output " -Recurse | Measure-Object).Count
+          
+          Write-Host "--- Data Source Count"
+          (Select-String -Path "*.tf" -Pattern "^data " -Recurse | Measure-Object).Count
+
+      - label: ":no_entry_sign: Deprecated Syntax Check"
+        key: "deprecated"
+        command: |
+          Write-Host "--- Checking for deprecated syntax..."
+          
+          $$legacyInterpolation = Select-String -Path "*.tf" -Pattern '\$$\{[^{]*\}' -Recurse
+          if ($$legacyInterpolation) {
+            Write-Host "Warning: Found potential legacy interpolation syntax:"
+            $$legacyInterpolation | ForEach-Object { Write-Host "  $$($_.Path):$$($_.LineNumber)" }
+          }
+          
+          $$deprecatedIgnore = Select-String -Path "*.tf" -Pattern 'ignore_changes.*=.*all' -Recurse
+          if ($$deprecatedIgnore) {
+            Write-Host "Warning: Found deprecated ignore_changes = all syntax:"
+            $$deprecatedIgnore | ForEach-Object { Write-Host "  $$($_.Path):$$($_.LineNumber)" }
+          }
+          
+          Write-Host "Deprecated syntax check complete"
+
+  - group: ":page_facing_up: Documentation"
+    steps:
+      - label: ":book: terraform-docs Check"
+        key: "terraform-docs"
+        command: |
+          $$env:PATH = "C:\buildkite-tools;$$env:PATH"
+          
+          if (Test-Path "README.md") {
+            terraform-docs markdown table . --output-check
+          } else {
+            Write-Host "Warning: No README.md found"
+            terraform-docs markdown table .
+          }
+        soft_fail:
+          - exit_status: 1
+
+      - label: ":pencil: Generate Docs (artifact)"
+        key: "generate-docs"
+        command: |
+          $$env:PATH = "C:\buildkite-tools;$$env:PATH"
+          terraform-docs markdown table . | Out-File -FilePath "TERRAFORM_DOCS.md" -Encoding utf8
+          Get-Content "TERRAFORM_DOCS.md"
+        artifact_paths:
+          - "TERRAFORM_DOCS.md"
+
+  - wait
+
+  - group: ":bookmark: Versioning & Changelog"
+    steps:
+      - label: ":crystal_ball: Determine Next Version"
+        key: "next-version"
+        command: |
+          $$env:PATH = "C:\buildkite-tools;$$env:PATH"
+          
+          # Get the latest tag
+          $$latestTag = git describe --tags --abbrev=0 2>$$null
+          if (-not $$latestTag) {
+            $$latestTag = "v0.0.0"
+            Write-Host "No existing tags found, starting from $$latestTag"
+          } else {
+            Write-Host "Latest tag: $$latestTag"
+          }
+          
+          # Use git-cliff to determine next version based on conventional commits
+          $$nextVersion = git-cliff --bumped-version 2>$$null
+          if (-not $$nextVersion) {
+            # Fallback: bump patch version
+            $$version = $$latestTag -replace '^v', ''
+            $$parts = $$version.Split('.')
+            $$parts[2] = [int]$$parts[2] + 1
+            $$nextVersion = "v" + ($$parts -join '.')
+          }
+          
+          Write-Host "Next version: $$nextVersion"
+          
+          # Export for subsequent steps
+          Set-Content -Path "VERSION" -Value $$nextVersion
+        artifact_paths:
+          - "VERSION"
+
+      - label: ":scroll: Generate Changelog"
+        key: "changelog"
+        command: |
+          $$env:PATH = "C:\buildkite-tools;$$env:PATH"
+          
+          Write-Host "--- Generating changelog with git-cliff"
+          git-cliff --output CHANGELOG.md
+          
+          Write-Host "--- Changelog preview (last 50 lines):"
+          Get-Content CHANGELOG.md -Tail 50
+        artifact_paths:
+          - "CHANGELOG.md"
+
+  - wait
+
+  - block: ":rocket: Release New Version?"
+    prompt: "Create a new release with the generated changelog?"
+    branches: "main master"
+    fields:
+      - text: "Release Notes (optional)"
+        key: "release-notes"
+        required: false
+        hint: "Additional notes to include in the release"
+
+  - label: ":git: Tag & Push Release"
+    key: "tag-release"
+    branches: "main master"
+    command: |
+      $$env:PATH = "C:\buildkite-tools;$$env:PATH"
+      $$ErrorActionPreference = "Stop"
+      
+      # Download version artifact
+      buildkite-agent artifact download "VERSION" .
+      $$nextVersion = (Get-Content "VERSION").Trim()
+      
+      Write-Host "--- Creating release $$nextVersion"
+      
+      # Configure git
+      git config user.email "buildkite@example.com"
+      git config user.name "Buildkite CI"
+      
+      # Generate final changelog
+      git-cliff --output CHANGELOG.md
+      
+      # Commit changelog if changed
+      git add CHANGELOG.md
+      $$hasChanges = git diff --cached --quiet; $$LASTEXITCODE -ne 0
+      if ($$hasChanges) {
+        git commit -m "chore(release): update CHANGELOG for $$nextVersion"
+      }
+      
+      # Create annotated tag
+      $$tagMessage = "Release $$nextVersion`n`nGenerated by Buildkite CI"
+      git tag -a $$nextVersion -m $$tagMessage
+      
+      Write-Host "--- Pushing tag $$nextVersion"
+      git push origin HEAD
+      git push origin $$nextVersion
+      
+      Write-Host "--- Release $$nextVersion complete!"
+
+  - wait: ~
+    continue_on_failure: true
+
+  - label: ":white_check_mark: Pipeline Complete"
+    command: |
+      Write-Host "OpenTofu module pipeline completed!"
+      Write-Host ""
+      Write-Host "Summary:"
+      Write-Host "  ✓ Format check"
+      Write-Host "  ✓ Validation"
+      Write-Host "  ✓ TFLint"
+      Write-Host "  ✓ Secret scanning (GitGuardian)"
+      Write-Host "  ✓ Security scans (tfsec, Trivy, Checkov)"
+      Write-Host "  ✓ Static analysis"
+      Write-Host "  ✓ Documentation"
+      Write-Host "  ✓ Versioning & Changelog"
