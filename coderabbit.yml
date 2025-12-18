@@ -1,0 +1,44 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+language: "en-US"
+early_access: false
+
+reviews:
+  profile: assertive
+  
+  path_instructions:
+    - path: "**/*.tf"
+      instructions: |
+        Review the HCL/Terraform code for readability and clarity.
+        Ensure Terraform best practices are being followed.
+        Check for proper resource naming conventions (snake_case).
+        Verify provider versions are pinned.
+        Look for hardcoded values that should be variables.
+        
+    - path: "**/*.tfvars"
+      instructions: |
+        Ensure no sensitive values are hardcoded.
+        Verify variable values match expected types.
+        
+    - path: "**/modules/**/*.tf"
+      instructions: |
+        Verify module inputs/outputs are well documented.
+        Check for proper variable validation blocks.
+        Ensure modules are reusable and don't have hardcoded values.
+  
+  tools:
+    # Security scanner for IaC
+    checkov:
+      enabled: true
+    
+    # Terraform linter
+    tflint:
+      enabled: true
+    
+    # Disable gitleaks - using GitGuardian instead
+    gitleaks:
+      enabled: false
+    
+    # General security analysis
+    semgrep:
+      enabled: true
