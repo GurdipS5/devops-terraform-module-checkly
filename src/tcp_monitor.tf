@@ -1,21 +1,3 @@
-# Basic TCP monitor
-resource "checkly_tcp_monitor" "example-tcp-monitor" {
-  name                      = "Example TCP monitor"
-  activated                 = true
-  should_fail               = false
-  frequency                 = 1
-  use_global_alert_settings = true
-
-  locations = [
-    "us-west-1"
-  ]
-
-  request {
-    hostname = "api.checklyhq.com"
-    port     = 80
-  }
-}
-
 # A more complex example using assertions and setting alerts
 resource "checkly_tcp_monitor" "example-tcp-monitor-2" {
   name                   = "Example TCP monitor 2"
